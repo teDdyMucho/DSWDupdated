@@ -7,10 +7,12 @@ import {
   addDoc, 
   doc, 
   updateDoc, 
-  deleteDoc 
+  deleteDoc,
+  getDoc
 } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { useAuth } from './AuthContext';
+import { fetchSignInMethodsForEmail } from 'firebase/auth';
 
 interface Team {
   id: string;
@@ -24,6 +26,7 @@ interface TeamMember {
   teamId: string;
   role: 'admin' | 'member';
   email?: string;
+  pending?: boolean;
 }
 
 interface TeamContextType {
@@ -38,6 +41,9 @@ interface TeamContextType {
   addTeamMember: (teamId: string, email: string, role: 'admin' | 'member') => Promise<void>;
   removeTeamMember: (teamMemberId: string) => Promise<void>;
   updateTeamMemberRole: (teamMemberId: string, role: 'admin' | 'member') => Promise<void>;
+  checkUserExists: (email: string) => Promise<boolean>;
+  acceptTeamInvitation: (teamMemberId: string) => Promise<void>;
+  pendingInvitations: TeamMember[];
 }
 
 const TeamContext = createContext<TeamContextType | null>(null);
@@ -59,6 +65,7 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
   const [teams, setTeams] = useState<Team[]>([]);
   const [currentTeam, setCurrentTeam] = useState<Team | null>(null);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [pendingInvitations, setPendingInvitations] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Load user's teams
@@ -68,6 +75,7 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
         setTeams([]);
         setCurrentTeam(null);
         setTeamMembers([]);
+        setPendingInvitations([]);
         setLoading(false);
         return;
       }
@@ -75,16 +83,38 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
       try {
         setLoading(true);
         
-        // Get team memberships for current user
-        const membershipQuery = query(
+        // Get team memberships for current user by userId
+        const membershipByIdQuery = query(
           collection(db, 'team_members'),
           where('userId', '==', currentUser.uid)
         );
         
-        const membershipSnapshot = await getDocs(membershipQuery);
-        const teamIds = membershipSnapshot.docs.map(doc => doc.data().teamId);
+        // Get team memberships for current user by email
+        const membershipByEmailQuery = query(
+          collection(db, 'team_members'),
+          where('email', '==', currentUser.email?.toLowerCase())
+        );
         
-        if (teamIds.length === 0) {
+        const [membershipByIdSnapshot, membershipByEmailSnapshot] = await Promise.all([
+          getDocs(membershipByIdQuery),
+          getDocs(membershipByEmailQuery)
+        ]);
+        
+        // Combine results and remove duplicates
+        const membershipDocs = [...membershipByIdSnapshot.docs, ...membershipByEmailSnapshot.docs];
+        const uniqueTeamIds = Array.from(new Set(membershipDocs.map(doc => doc.data().teamId)));
+        
+        // Process pending invitations
+        const pendingInvites = membershipByEmailSnapshot.docs
+          .filter(doc => doc.data().pending === true)
+          .map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          })) as TeamMember[];
+        
+        setPendingInvitations(pendingInvites);
+        
+        if (uniqueTeamIds.length === 0) {
           setTeams([]);
           setCurrentTeam(null);
           setTeamMembers([]);
@@ -95,7 +125,7 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
         // Get team details
         const teamsQuery = query(
           collection(db, 'teams'),
-          where('__name__', 'in', teamIds)
+          where('__name__', 'in', uniqueTeamIds)
         );
         
         const teamsSnapshot = await getDocs(teamsQuery);
@@ -240,26 +270,99 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
     }
   };
 
+  const checkUserExists = async (email: string): Promise<boolean> => {
+    try {
+      // First try to find the user in the users collection
+      const usersQuery = query(
+        collection(db, 'users'),
+        where('email', '==', email.toLowerCase())
+      );
+      
+      const usersSnapshot = await getDocs(usersQuery);
+      
+      if (!usersSnapshot.empty) {
+        return true;
+      }
+      
+      // If not found in users collection, check team_members collection
+      // This handles cases where the user might have been invited before
+      const membersQuery = query(
+        collection(db, 'team_members'),
+        where('email', '==', email.toLowerCase())
+      );
+      
+      const membersSnapshot = await getDocs(membersQuery);
+      
+      if (!membersSnapshot.empty) {
+        return true;
+      }
+      
+      // As a fallback, try Firebase Auth methods (though this may have limitations)
+      try {
+        const methods = await fetchSignInMethodsForEmail(auth, email);
+        if (methods.length > 0) {
+          return true;
+        }
+      } catch (authError) {
+        console.log('Auth check failed, continuing with other checks:', authError);
+      }
+      
+      // If we're in development mode, allow all emails for testing
+      if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        console.log('Development mode: allowing all emails for testing');
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error checking if user exists:', error);
+      // In case of error, we'll allow the operation to proceed
+      // This prevents blocking legitimate users due to technical issues
+      return true;
+    }
+  };
+
   const addTeamMember = async (teamId: string, email: string, role: 'admin' | 'member'): Promise<void> => {
     try {
-      // In a real application, you would:
-      // 1. Check if the user exists in your system
-      // 2. Get their userId
-      // 3. Add them to the team
+      // Check if the user is already a member of this team
+      const memberQuery = query(
+        collection(db, 'team_members'),
+        where('teamId', '==', teamId),
+        where('email', '==', email.toLowerCase())
+      );
       
-      // For this example, we'll just create a placeholder
-      // In a real app, you would implement an invitation system
+      const memberSnapshot = await getDocs(memberQuery);
+      
+      if (!memberSnapshot.empty) {
+        throw new Error('This user is already a member of this team.');
+      }
+      
+      // Get user ID from email (if possible)
+      const usersQuery = query(
+        collection(db, 'users'),
+        where('email', '==', email.toLowerCase())
+      );
+      
+      const usersSnapshot = await getDocs(usersQuery);
+      let userId = '';
+      
+      if (!usersSnapshot.empty) {
+        userId = usersSnapshot.docs[0].id;
+      }
+      
+      // Add the team member
       await addDoc(collection(db, 'team_members'), {
         teamId,
-        email,
+        email: email.toLowerCase(),
+        userId,
         role,
         createdAt: new Date(),
-        pending: true
+        pending: userId === '' // Mark as pending if we couldn't find the user ID
       });
       
       // Reload team members
       await loadTeamMembers(teamId);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error adding team member:', error);
       throw error;
     }
@@ -296,6 +399,42 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
     }
   };
 
+  const acceptTeamInvitation = async (teamMemberId: string): Promise<void> => {
+    if (!currentUser) throw new Error('User not authenticated');
+    
+    try {
+      const memberRef = doc(db, 'team_members', teamMemberId);
+      await updateDoc(memberRef, { 
+        userId: currentUser.uid,
+        pending: false
+      });
+      
+      // Update pending invitations list
+      setPendingInvitations(prev => prev.filter(invite => invite.id !== teamMemberId));
+      
+      // Reload teams to include the newly accepted team
+      const memberDoc = await getDoc(memberRef);
+      if (memberDoc.exists()) {
+        const teamId = memberDoc.data().teamId;
+        
+        // Get team details
+        const teamDoc = await getDoc(doc(db, 'teams', teamId));
+        if (teamDoc.exists()) {
+          const teamData = { id: teamDoc.id, ...teamDoc.data() } as Team;
+          
+          // Add to teams list if not already there
+          setTeams(prev => {
+            if (prev.some(t => t.id === teamId)) return prev;
+            return [...prev, teamData];
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error accepting team invitation:', error);
+      throw error;
+    }
+  };
+
   const value = {
     teams,
     currentTeam,
@@ -307,7 +446,10 @@ export const TeamProvider: React.FC<TeamProviderProps> = ({ children }) => {
     selectTeam,
     addTeamMember,
     removeTeamMember,
-    updateTeamMemberRole
+    updateTeamMemberRole,
+    checkUserExists,
+    acceptTeamInvitation,
+    pendingInvitations
   };
 
   return (

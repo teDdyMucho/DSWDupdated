@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { TeamSelector } from './TeamSelector';
 import { CreateTeamModal } from './CreateTeamModal';
 import { TeamMembers } from './TeamMembers';
 import { TeamSettings } from './TeamSettings';
+import { PendingInvitations } from './PendingInvitations';
 import { useAuth } from '../../contexts/AuthContext';
 import { LogOut, Settings, Users } from 'lucide-react';
 
@@ -31,6 +32,9 @@ export function TeamManagementPage() {
           </div>
         </div>
       </div>
+      
+      {/* Display pending invitations */}
+      <PendingInvitations />
       
       <div className="bg-white rounded-lg shadow-md">
         <div className="border-b border-gray-200">

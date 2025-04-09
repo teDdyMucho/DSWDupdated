@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link, Copy, CheckCircle, Trash2, Eye, UserPlus, Search, Filter, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { Link, Copy, CheckCircle, Trash2, Eye, UserPlus, Search, Filter, X, ChevronDown, ChevronUp, UploadCloud } from 'lucide-react';
 import { useTeam } from '../../contexts/TeamContext';
 import { db } from '../../lib/firebase';
 import { collection, query, where, getDocs, addDoc, deleteDoc, doc, writeBatch, orderBy } from 'firebase/firestore';
@@ -51,6 +51,8 @@ export function FormLinksManagement() {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState<SortConfig>(null);
   const [visibleColumns, setVisibleColumns] = useState<Set<string>>(new Set(TABLE_COLUMNS.map(col => col.key)));
+  const [selectedSubmissions, setSelectedSubmissions] = useState<Set<string>>(new Set());
+  const [bulkProcessing, setBulkProcessing] = useState(false);
 
   useEffect(() => {
     if (currentTeam) {
@@ -212,6 +214,73 @@ export function FormLinksManagement() {
         newSet.delete(submission.id);
         return newSet;
       });
+    }
+  };
+
+  const bulkAddToBeneficiaryList = async () => {
+    if (!currentTeam || selectedSubmissions.size === 0) return;
+    
+    if (!confirm(`Are you sure you want to add ${selectedSubmissions.size} submissions to the beneficiary list?`)) {
+      return;
+    }
+    
+    try {
+      setBulkProcessing(true);
+      const batch = writeBatch(db);
+      let successCount = 0;
+      let errorCount = 0;
+      
+      // Get selected submissions
+      const selectedItems = submissions.filter(submission => selectedSubmissions.has(submission.id));
+      
+      // Process each submission
+      for (const submission of selectedItems) {
+        try {
+          await addDoc(collection(db, 'beneficiaries'), {
+            ...submission,
+            team_id: currentTeam.id,
+            created_at: new Date()
+          });
+          successCount++;
+        } catch (err) {
+          console.error('Error adding submission to beneficiary list:', err);
+          errorCount++;
+        }
+      }
+      
+      // Clear selections
+      setSelectedSubmissions(new Set());
+      
+      // Show results
+      alert(`Added ${successCount} submissions to Beneficiary List. ${errorCount > 0 ? `Failed to add ${errorCount} submissions.` : ''}`);
+      
+    } catch (err) {
+      console.error('Error in bulk add operation:', err);
+      alert('Failed to complete bulk add operation');
+    } finally {
+      setBulkProcessing(false);
+    }
+  };
+
+  const toggleSubmissionSelection = (submissionId: string) => {
+    setSelectedSubmissions(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(submissionId)) {
+        newSet.delete(submissionId);
+      } else {
+        newSet.add(submissionId);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleAllSubmissions = () => {
+    if (selectedSubmissions.size === sortedSubmissions.length) {
+      // Deselect all
+      setSelectedSubmissions(new Set());
+    } else {
+      // Select all
+      setSelectedSubmissions(new Set(sortedSubmissions.map(s => s.id)));
     }
   };
 
@@ -393,6 +462,17 @@ export function FormLinksManagement() {
             </div>
             
             <div className="flex items-center space-x-4">
+              {selectedSubmissions.size > 0 && (
+                <button
+                  onClick={bulkAddToBeneficiaryList}
+                  disabled={bulkProcessing || selectedSubmissions.size === 0}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 flex items-center"
+                >
+                  <UploadCloud className="w-4 h-4 mr-2" />
+                  Bulk Add ({selectedSubmissions.size})
+                </button>
+              )}
+              
               <select
                 value={selectedLink || ''}
                 onChange={(e) => setSelectedLink(e.target.value || null)}
@@ -447,6 +527,14 @@ export function FormLinksManagement() {
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap">
+                    <input
+                      type="checkbox"
+                      checked={selectedSubmissions.size > 0 && selectedSubmissions.size === sortedSubmissions.length}
+                      onChange={toggleAllSubmissions}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                  </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap">
                     Actions
                   </th>
@@ -480,6 +568,14 @@ export function FormLinksManagement() {
               <tbody className="bg-white divide-y divide-gray-200">
                 {sortedSubmissions.map((submission) => (
                   <tr key={submission.id} className="hover:bg-gray-50">
+                    <td className="px-3 py-4 whitespace-nowrap">
+                      <input
+                        type="checkbox"
+                        checked={selectedSubmissions.has(submission.id)}
+                        onChange={() => toggleSubmissionSelection(submission.id)}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <button
                         onClick={() => addToBeneficiaryList(submission)}
